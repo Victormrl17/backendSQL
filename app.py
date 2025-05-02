@@ -7,7 +7,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
-from safetensors.torch import load_file
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 
 # --- Configuraciones ---
@@ -41,14 +40,12 @@ class Historial(db.Model):
 with app.app_context():
     db.create_all()
 
-# --- Cargar modelo NLP ---
-model_path = './trained_model'
+# --- Cargar modelo NLP desde Hugging Face ---
+model_path = 'Codesql/SqlCodebert'  
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-num_labels = 9
 
 tokenizer = AutoTokenizer.from_pretrained(model_path)
-weights = load_file(f'{model_path}/model.safetensors')
-model = AutoModelForTokenClassification.from_pretrained(model_path, state_dict=weights, num_labels=num_labels)
+model = AutoModelForTokenClassification.from_pretrained(model_path)
 model.to(device)
 model.eval()
 
@@ -58,9 +55,7 @@ model.config.id2label = {
 }
 model.config.label2id = {v: k for k, v in model.config.id2label.items()}
 
-response = {}
-
-# --- Utilidades para el modelo ---
+# --- Utilidades ---
 def dividir_consultas(sql_code):
     parsed = sqlparse.parse(sql_code)
     return [str(stmt).strip() for stmt in parsed if stmt.token_first(skip_cm=True)]
@@ -163,7 +158,6 @@ def tag_sql():
 def get_sql():
     return jsonify({"mensaje": "No hay linaje disponible"}), 404
 
-# --- Registro ---
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.get_json() or {}
@@ -187,7 +181,6 @@ def register():
     db.session.commit()
     return jsonify({"message": "Usuario registrado correctamente"}), 201
 
-# --- Login con JWT ---
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json() or {}
@@ -204,7 +197,6 @@ def login():
     token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
     return jsonify({"message": "Login exitoso", "token": token}), 200
 
-# --- Historial ---
 @app.route('/api/historial', methods=['POST'])
 def guardar_historial():
     data = request.get_json() or {}
