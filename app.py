@@ -1,22 +1,29 @@
-from flask import Flask, request, jsonify
+import os
+import jwt
 import torch
-from transformers import AutoTokenizer, AutoModelForTokenClassification
+import sqlparse
+from datetime import datetime
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
-import os
+from safetensors.torch import load_file
+from transformers import AutoTokenizer, AutoModelForTokenClassification
 
+# --- Configuraciones ---
 app = Flask(__name__)
 CORS(app)
 
-#--------------------------------------------------------------------
+# Configuraciones del entorno
+DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///users.db')
+SECRET_KEY = os.environ.get('SECRET_KEY', 'supersecretkey')
 
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://dblinejage_user:W3rcpNuH2qaaajWrYNMs7SbKAqy8hkIB@dpg-csua69ggph6c7388lc0g-a.ohio-postgres.render.com/dblinejage')
-app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL  
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 db = SQLAlchemy(app)
 
-
+# --- Modelos de base de datos ---
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(150), nullable=False)
@@ -29,194 +36,219 @@ class Historial(db.Model):
     fecha = db.Column(db.Date, nullable=False)
     tables = db.Column(db.JSON, nullable=False)
     columns = db.Column(db.JSON, nullable=False)
-    source_tables = db.Column(db.JSON, nullable=True)
-    destination_table = db.Column(db.String(150), nullable=True)
-
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
 with app.app_context():
     db.create_all()
 
-#--------------------------------------------------------------------
+# --- Cargar modelo NLP ---
+model_path = './trained_model'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+num_labels = 9
 
-tokenizer = AutoTokenizer.from_pretrained('./trained_model')
-model = AutoModelForTokenClassification.from_pretrained('./trained_model')
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+weights = load_file(f'{model_path}/model.safetensors')
+model = AutoModelForTokenClassification.from_pretrained(model_path, state_dict=weights, num_labels=num_labels)
 model.to(device)
-response = ''
+model.eval()
 
-id_to_label = {
-    0: "O",
-    1: "B-TABLE",
-    2: "I-TABLE",
-    3: "B-COLUMN",
-    4: "I-COLUMN"
+model.config.id2label = {
+    0: "O", 1: "B-TRGTAB", 2: "I-TRGTAB", 3: "B-SRCTAB", 4: "I-SRCTAB",
+    5: "B-TRGCOL", 6: "I-TRGCOL", 7: "B-SRCOL", 8: "I-SRCOL"
 }
+model.config.label2id = {v: k for k, v in model.config.id2label.items()}
 
-# Función para etiquetar una consulta SQL
+response = {}
+
+# --- Utilidades para el modelo ---
+def dividir_consultas(sql_code):
+    parsed = sqlparse.parse(sql_code)
+    return [str(stmt).strip() for stmt in parsed if stmt.token_first(skip_cm=True)]
+
 def tag_sql_query(query):
-    inputs = tokenizer(query, return_tensors="pt", truncation=True, padding='max_length', max_length=128)
+    inputs = tokenizer(query, return_tensors='pt', truncation=True, padding='max_length', max_length=512)
     inputs = {k: v.to(device) for k, v in inputs.items()}
-
     with torch.no_grad():
         outputs = model(**inputs)
-    logits = outputs.logits
-    predictions = torch.argmax(logits, dim=2)
-
+    preds = torch.argmax(outputs.logits, dim=2)[0]
     tokens = tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
-    labels = [id_to_label[id.item()] for id in predictions[0]]
+    labels = [model.config.id2label[p.item()] for p in preds]
+    return [(tokenizer.convert_tokens_to_string([token]).strip(), label) for token, label in zip(tokens, labels) if token not in tokenizer.all_special_tokens]
 
-    filtered_tokens_labels = [(token, label) for token, label in zip(tokens, labels) if token not in tokenizer.all_special_tokens]
+def reconstruir_entidades(tagged):
+    entidades, actual, tipo_actual = [], [], None
 
-    for i in range(len(filtered_tokens_labels) - 1):
-        if filtered_tokens_labels[i][0].lower() == 'in' and filtered_tokens_labels[i + 1][0].lower() == 'to':
-            if i + 2 < len(filtered_tokens_labels):
-                filtered_tokens_labels[i + 2] = (filtered_tokens_labels[i + 2][0], 'B-TABLE')
+    def guardar_entidad(tokens, tipo):
+        if not tokens: return None, None
+        texto = "".join(tokens).replace(" ", "").strip()
+        return texto, tipo
 
-    return filtered_tokens_labels
+    for token, etiqueta in tagged + [(None, 'O')]:
+        if etiqueta == 'O':
+            if actual:
+                texto, tipo = guardar_entidad(actual, tipo_actual)
+                if texto: entidades.append((texto, tipo))
+                actual, tipo_actual = [], None
+            continue
 
-# Función para extraer tablas y columnas etiquetadas
-def extract_tables_columns(tagged_query):
-    tables = set()
-    columns = set()
-    source_tables = set()
-    destination_table = None
+        prefijo, tipo = etiqueta.split('-', 1)
+        if prefijo == 'B' or tipo != tipo_actual:
+            if actual:
+                texto, tipo_ant = guardar_entidad(actual, tipo_actual)
+                if texto: entidades.append((texto, tipo_ant))
+            actual, tipo_actual = [token], tipo
+        else:
+            actual.append(token)
 
-    in_insert = False
-    in_from = False
+    return entidades
 
-    for token, label in tagged_query:
-        if token.lower() == "into":
-            in_insert = True
-        elif token.lower() == "from":
-            in_from = True
-        elif label == "B-TABLE" or label == "I-TABLE":
-            if in_insert and destination_table is None:
-                destination_table = token
-            elif in_from:
-                source_tables.add(token)
-                tables.add(token)
-            else:
-                tables.add(token)
-        elif label == "B-COLUMN" or label == "I-COLUMN":
-            columns.add(token)
-        if token.lower() == 'to' and label == 'O':
-            next_index = tagged_query.index((token, label)) + 1
-            if next_index < len(tagged_query):
-                next_token, next_label = tagged_query[next_index]
-                if next_label == 'B-TABLE':
-                    destination_table = next_token
-        if token == ";":
-            in_insert = False
-            in_from = False
-    if not source_tables and len(tables) == 1:
-        source_tables = tables.copy()
+def extraer_select_segmento(query):
+    query_upper = query.upper()
+    select_idx, from_idx = query_upper.find('SELECT'), query_upper.find('FROM')
+    return query[select_idx+6:from_idx].strip() if select_idx != -1 and from_idx != -1 else ""
 
-    return list(tables), list(columns), list(source_tables), destination_table
+def organizar_linaje(consultas):
+    linaje = []
+    for consulta in consultas:
+        tagged = tag_sql_query(consulta)
+        entidades = reconstruir_entidades(tagged)
 
-#--------------------------------------------------------------------
+        select_segment = extraer_select_segmento(consulta)
+        columnas_select = [c.strip().split(" ")[0].split('.')[-1] for c in select_segment.split(',') if c.strip()] if select_segment else []
 
+        src_tabs, tgt_tabs, src_cols, tgt_cols = [], [], [], []
+
+        for valor, tipo in entidades:
+            if tipo == 'SRCTAB': src_tabs.append(valor)
+            elif tipo == 'TRGTAB': tgt_tabs.append(valor)
+            elif tipo == 'SRCOL':
+                if not columnas_select or any(c.lower() in valor.lower() for c in columnas_select):
+                    src_cols.append(valor)
+            elif tipo == 'TRGCOL': tgt_cols.append(valor)
+
+        if 'INSERT' in consulta.upper():
+            linaje.append({
+                'source_tables': src_tabs,
+                'source_columns': src_cols or ['Todas las columnas'],
+                'target_table': tgt_tabs[0] if tgt_tabs else '',
+                'target_columns': tgt_cols or src_cols
+            })
+        elif 'SELECT' in consulta.upper() and 'INTO' in consulta.upper():
+            linaje.append({
+                'source_tables': src_tabs,
+                'source_columns': ['Todas las columnas'],
+                'target_table': tgt_tabs[0] if tgt_tabs else '',
+                'target_columns': ['Todas las columnas']
+            })
+        elif 'JOIN' in consulta.upper():
+            for src in src_tabs:
+                linaje.append({
+                    'source_tables': [src],
+                    'source_columns': src_cols or ['Todas las columnas'],
+                    'target_table': tgt_tabs[0] if tgt_tabs else '',
+                    'target_columns': tgt_cols or ['Todas las columnas']
+                })
+
+    return linaje
+
+# --- Rutas API ---
 @app.route('/api/tag_sql', methods=['PUT'])
 def tag_sql():
-    global response
-    data = request.json
-    query = data.get('query', '')
-
-    tagged_query = tag_sql_query(query)
-    response = {
-        "tagged_query": [{"token": token, "label": label} for token, label in tagged_query],
-        "tables": [],
-        "columns": [],
-        "source_tables": [],
-        "destination_table": None
-    }
-
-
-    tables, columns, source_tables, destination_table = extract_tables_columns(tagged_query)
-    response["tables"] = tables
-    response["columns"] = columns
-    response["source_tables"] = source_tables
-    response["destination_table"] = destination_table
-    print(response)
-    return jsonify({"mensaje": "Consulta guardada y procesada con éxito"})
+    sql_code = request.json.get('query', '')
+    consultas = dividir_consultas(sql_code)
+    resultado = organizar_linaje(consultas)
+    return jsonify({"mensaje": "Linaje generado", "resultado": {"linaje": resultado}})
 
 @app.route('/api/get_sql', methods=['GET'])
 def get_sql():
-    if response:
-        return jsonify(response)
-    else:
-        return jsonify({"mensaje": "No hay consultas procesadas disponibles"}), 404
+    return jsonify({"mensaje": "No hay linaje disponible"}), 404
 
-
+# --- Registro ---
 @app.route('/api/register', methods=['POST'])
 def register():
-    data = request.get_json()
-    username = data.get('username')
-    email = data.get('email')
-    password = data.get('password')
+    data = request.get_json() or {}
+    username = data.get('username', '')
+    email = data.get('email', '')
+    password = data.get('password', '')
 
-    if not username or not email or not password:
-        return jsonify({'message': 'Faltan campos obligatorios'}), 400
+    if not all([username, email, password]):
+        missing = [f for f in ["username", "email", "password"] if not data.get(f)]
+        return jsonify({"message": "Faltan campos", "missing": missing}), 400
 
-    hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
-    new_user = User(username=username, email=email, password=hashed_password)
+    if User.query.filter_by(email=email).first():
+        return jsonify({"message": "El email ya está registrado"}), 409
 
-    try:
-        db.session.add(new_user)
-        db.session.commit()
-        return jsonify({'message': 'Usuario registrado exitosamente'}), 201
-    except:
-        return jsonify({'message': 'Error al registrar usuario. El correo o nombre de usuario ya existe'}), 400
+    if User.query.filter_by(username=username).first():
+        return jsonify({"message": "El nombre de usuario ya está registrado"}), 409
 
+    hashed_pwd = generate_password_hash(password)
+    user = User(username=username, email=email, password=hashed_pwd)
+    db.session.add(user)
+    db.session.commit()
+    return jsonify({"message": "Usuario registrado correctamente"}), 201
 
+# --- Login con JWT ---
 @app.route('/api/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-
+    data = request.get_json() or {}
+    email, password = data.get('email'), data.get('password')
     user = User.query.filter_by(email=email).first()
 
-    if user and check_password_hash(user.password, password):
-        return jsonify({'message': 'Inicio de sesión exitoso', 'token': 'fake-jwt-token'}), 200
-    else:
-        return jsonify({'message': 'Correo o contraseña incorrectos'}), 401
+    if not user:
+        return jsonify({"message": "Correo invalido"}), 404
 
+    if not check_password_hash(user.password, password):
+        return jsonify({"message": "Contraseña incorrecta"}), 401
+
+    payload = {"user_id": user.id, "username": user.username}
+    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+    return jsonify({"message": "Login exitoso", "token": token}), 200
+
+# --- Historial ---
 @app.route('/api/historial', methods=['POST'])
 def guardar_historial():
-    data = request.get_json()
-    nuevo_registro = Historial(
-        nombre=data['nombre'],
-        fecha=data['fecha'],
-        tables=data['result']['tables'],
-        columns=data['result']['columns'],
-        source_tables=data['result'].get('sourceTables', []),
-        destination_table=data['result'].get('destinationTable', None)
-    )
-    db.session.add(nuevo_registro)
+    data = request.get_json() or {}
+    nombre, linaje, user_id = data.get("nombre"), data.get("linaje"), data.get("user_id")
+    if not all([nombre, linaje, user_id]):
+        return jsonify({"message": "Nombre, linaje y usuario son requeridos"}), 400
+
+    nuevo_historial = Historial(nombre=nombre, fecha=datetime.now(), tables=linaje, columns=linaje, user_id=user_id)
+    db.session.add(nuevo_historial)
     db.session.commit()
-    return jsonify({'message': 'Registro guardado exitosamente'}), 201
+    return jsonify({"message": "Linaje guardado exitosamente"}), 201
 
 @app.route('/api/historial', methods=['GET'])
-def obtener_historial():
-    historial = Historial.query.all()
-    response = [{'id': h.id, 'nombre': h.nombre, 'fecha': h.fecha, 'tables': h.tables, 'columns': h.columns, 'source_tables': h.source_tables, 'destination_table': h.destination_table} for h in historial]
-    return jsonify(response)
+def listar_historial():
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({'message': 'ID de usuario requerido'}), 400
+
+    historiales = Historial.query.filter_by(user_id=user_id).all()
+    return jsonify([{ 'id': h.id, 'nombre': h.nombre, 'fecha': h.fecha.strftime('%Y-%m-%d'), 'linaje': h.tables } for h in historiales]), 200
 
 @app.route('/api/historial/<int:id>', methods=['DELETE'])
 def eliminar_historial(id):
-    registro = Historial.query.get_or_404(id)
-    db.session.delete(registro)
+    historial = Historial.query.get(id)
+    if not historial:
+        return jsonify({'message': 'Historial no encontrado'}), 404
+
+    db.session.delete(historial)
     db.session.commit()
-    return jsonify({'message': 'Registro eliminado exitosamente'}), 200
+    return jsonify({'message': 'Historial eliminado correctamente'}), 200
 
 @app.route('/api/historial/<int:id>', methods=['PUT'])
 def editar_historial(id):
-    data = request.get_json()
-    registro = Historial.query.get_or_404(id)
-    registro.nombre = data.get('nombre', registro.nombre)
+    historial = Historial.query.get(id)
+    if not historial:
+        return jsonify({'message': 'Historial no encontrado'}), 404
+
+    nuevo_nombre = request.get_json().get('nombre')
+    if not nuevo_nombre:
+        return jsonify({'message': 'El nombre es requerido'}), 400
+
+    historial.nombre = nuevo_nombre
     db.session.commit()
-    return jsonify({'message': 'Registro editado exitosamente'}), 200
+    return jsonify({'message': 'Nombre del historial actualizado correctamente'}), 200
 
 if __name__ == '__main__':
     app.run(debug=True)
