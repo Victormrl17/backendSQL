@@ -11,7 +11,8 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification
 
 # --- Configuraciones ---
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["https://sqlineage.netlify.app"], supports_credentials=True)
+
 
 # Configuraciones del entorno
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///users.db')
