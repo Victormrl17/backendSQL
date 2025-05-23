@@ -200,10 +200,29 @@ def login():
     if not check_password_hash(user.password, password):
         return jsonify({"message": "Contraseña incorrecta"}), 401
 
-    payload = {"user_id": user.id, "username": user.username}
-    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
-    return jsonify({"message": "Login exitoso", "token": token}), 200
+    return jsonify({
+        "message": "Login exitoso",
+        "user_id": user.id,
+        "username": user.username
+    }), 200
 
+
+#@app.route('/api/login', methods=['POST'])
+#def login():
+#    data = request.get_json() or {}
+#    email, password = data.get('email'), data.get('password')
+#    user = User.query.filter_by(email=email).first()
+#
+#    if not user:
+#        return jsonify({"message": "Correo invalido"}), 404
+#
+#    if not check_password_hash(user.password, password):
+#        return jsonify({"message": "Contraseña incorrecta"}), 401
+#
+#    payload = {"user_id": user.id, "username": user.username}
+#    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+#    return jsonify({"message": "Login exitoso", "token": token}), 200
+#
 @app.route('/api/historial', methods=['POST'])
 def guardar_historial():
     data = request.get_json() or {}
