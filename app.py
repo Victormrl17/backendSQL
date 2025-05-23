@@ -2,15 +2,12 @@ import os
 import jwt
 import torch
 import sqlparse
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from transformers import AutoTokenizer, AutoModelForTokenClassification
-
-# --- Configuraciones ---
 
 # --- Configuraciones ---
 app = Flask(__name__)
@@ -23,6 +20,7 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
     return response
 
+# Configuraciones del entorno
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///users.db')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'supersecretkey')
 
@@ -49,8 +47,8 @@ class Historial(db.Model):
 with app.app_context():
     db.create_all()
 
-# --- Modelo NLP ---
-model_path = 'Codesql/SqlCodebert'
+# --- Cargar modelo NLP desde Hugging Face ---
+model_path = 'Codesql/SqlCodebert'  
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -64,24 +62,7 @@ model.config.id2label = {
 }
 model.config.label2id = {v: k for k, v in model.config.id2label.items()}
 
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
-        if not token or not token.startswith("Bearer "):
-            return jsonify({'message': 'Token requerido o malformado'}), 401
-        try:
-            token = token.split(" ")[1]
-            decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-            request.user = decoded
-        except jwt.ExpiredSignatureError:
-            return jsonify({'message': 'Token expirado'}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({'message': 'Token inválido'}), 401
-        return f(*args, **kwargs)
-    return decorated
-
-
+# --- Utilidades ---
 def dividir_consultas(sql_code):
     parsed = sqlparse.parse(sql_code)
     return [str(stmt).strip() for stmt in parsed if stmt.token_first(skip_cm=True)]
@@ -98,6 +79,7 @@ def tag_sql_query(query):
 
 def reconstruir_entidades(tagged):
     entidades, actual, tipo_actual = [], [], None
+
     def guardar_entidad(tokens, tipo):
         if not tokens: return None, None
         texto = "".join(tokens).replace(" ", "").strip()
@@ -132,8 +114,10 @@ def organizar_linaje(consultas):
     for consulta in consultas:
         tagged = tag_sql_query(consulta)
         entidades = reconstruir_entidades(tagged)
+
         select_segment = extraer_select_segmento(consulta)
         columnas_select = [c.strip().split(" ")[0].split('.')[-1] for c in select_segment.split(',') if c.strip()] if select_segment else []
+
         src_tabs, tgt_tabs, src_cols, tgt_cols = [], [], [], []
 
         for valor, tipo in entidades:
@@ -171,7 +155,6 @@ def organizar_linaje(consultas):
 
 # --- Rutas API ---
 @app.route('/api/tag_sql', methods=['PUT'])
-@token_required
 def tag_sql():
     sql_code = request.json.get('query', '')
     consultas = dividir_consultas(sql_code)
@@ -217,18 +200,11 @@ def login():
     if not check_password_hash(user.password, password):
         return jsonify({"message": "Contraseña incorrecta"}), 401
 
-    expiration_time = datetime.utcnow() + timedelta(minutes=30)
-    payload = {
-        "user_id": user.id,
-        "username": user.username,
-        "exp": expiration_time
-    }
-
+    payload = {"user_id": user.id, "username": user.username}
     token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
     return jsonify({"message": "Login exitoso", "token": token}), 200
 
 @app.route('/api/historial', methods=['POST'])
-@token_required
 def guardar_historial():
     data = request.get_json() or {}
     nombre, linaje, user_id = data.get("nombre"), data.get("linaje"), data.get("user_id")
@@ -241,7 +217,6 @@ def guardar_historial():
     return jsonify({"message": "Linaje guardado exitosamente"}), 201
 
 @app.route('/api/historial', methods=['GET'])
-@token_required
 def listar_historial():
     user_id = request.args.get('user_id')
     if not user_id:
@@ -251,7 +226,6 @@ def listar_historial():
     return jsonify([{ 'id': h.id, 'nombre': h.nombre, 'fecha': h.fecha.strftime('%Y-%m-%d'), 'linaje': h.tables } for h in historiales]), 200
 
 @app.route('/api/historial/<int:id>', methods=['DELETE'])
-@token_required
 def eliminar_historial(id):
     historial = Historial.query.get(id)
     if not historial:
@@ -262,7 +236,6 @@ def eliminar_historial(id):
     return jsonify({'message': 'Historial eliminado correctamente'}), 200
 
 @app.route('/api/historial/<int:id>', methods=['PUT'])
-@token_required
 def editar_historial(id):
     historial = Historial.query.get(id)
     if not historial:
@@ -277,4 +250,5 @@ def editar_historial(id):
     return jsonify({'message': 'Nombre del historial actualizado correctamente'}), 200
 
 if __name__ == '__main__':
+    #app.run(debug=True)
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
