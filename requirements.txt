@@ -7,3 +7,4 @@ safetensors==0.4.5
 sqlparse==0.5.1
 PyJWT==2.10.1
 psycopg2-binary==2.9.10
+gunicorn

@@ -64,14 +64,14 @@ model.config.id2label = {
 }
 model.config.label2id = {v: k for k, v in model.config.id2label.items()}
 
-# --- Token decorator ---
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'message': 'Token requerido'}), 401
+        if not token or not token.startswith("Bearer "):
+            return jsonify({'message': 'Token requerido o malformado'}), 401
         try:
+            token = token.split(" ")[1]
             decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
             request.user = decoded
         except jwt.ExpiredSignatureError:
@@ -81,7 +81,7 @@ def token_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# --- Utilidades NLP ---
+
 def dividir_consultas(sql_code):
     parsed = sqlparse.parse(sql_code)
     return [str(stmt).strip() for stmt in parsed if stmt.token_first(skip_cm=True)]
