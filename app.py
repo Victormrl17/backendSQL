@@ -223,6 +223,11 @@ def login():
 #    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
 #    return jsonify({"message": "Login exitoso", "token": token}), 200
 #
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({"message": "Backend SQL está funcionando correctamente"}), 200
+
 @app.route('/api/historial', methods=['POST'])
 def guardar_historial():
     data = request.get_json() or {}
