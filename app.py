@@ -11,11 +11,14 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification
 
 # --- Configuraciones ---
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app, resources={r"/api/*": {"origins": ["https://sqlineage.netlify.app", "http://localhost:4200"]}})
 
 @app.after_request
 def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', 'https://sqlineage.netlify.app')
+    origin = request.headers.get('Origin')
+    allowed_origins = ['https://sqlineage.netlify.app', 'http://localhost:4200']
+    if origin in allowed_origins:
+        response.headers['Access-Control-Allow-Origin'] = origin
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
     return response
@@ -206,24 +209,6 @@ def login():
         "username": user.username
     }), 200
 
-
-#@app.route('/api/login', methods=['POST'])
-#def login():
-#    data = request.get_json() or {}
-#    email, password = data.get('email'), data.get('password')
-#    user = User.query.filter_by(email=email).first()
-#
-#    if not user:
-#        return jsonify({"message": "Correo invalido"}), 404
-#
-#    if not check_password_hash(user.password, password):
-#        return jsonify({"message": "Contraseña incorrecta"}), 401
-#
-#    payload = {"user_id": user.id, "username": user.username}
-#    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
-#    return jsonify({"message": "Login exitoso", "token": token}), 200
-#
-
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({"message": "Backend SQL está funcionando correctamente"}), 200
@@ -274,5 +259,4 @@ def editar_historial(id):
     return jsonify({'message': 'Nombre del historial actualizado correctamente'}), 200
 
 if __name__ == '__main__':
-    #app.run(debug=True)
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
