@@ -11,12 +11,20 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification
 
 # --- Configuraciones ---
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://sqlineage.netlify.app", "http://localhost:4200"]}})
-
+CORS(app, resources={r"/api/*": {"origins": [
+    "https://sqlineage.netlify.app",
+    "http://localhost:4200",
+    "https://front-modelonlp.vercel.app"
+]}})
+# Y también en after_request:
 @app.after_request
 def after_request(response):
     origin = request.headers.get('Origin')
-    allowed_origins = ['https://sqlineage.netlify.app', 'http://localhost:4200']
+    allowed_origins = [
+        'https://sqlineage.netlify.app',
+        'http://localhost:4200',
+        'https://front-modelonlp.vercel.app'
+    ]
     if origin in allowed_origins:
         response.headers['Access-Control-Allow-Origin'] = origin
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
